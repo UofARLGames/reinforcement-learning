@@ -11,7 +11,6 @@ import numpy as np
 import os
 import random
 import sys
-import tensorflow as tf
 import pdb
 
 if "../" not in sys.path:
@@ -26,6 +25,7 @@ from collections import deque, namedtuple
 env = gym.envs.make("Breakout-v0")
 
 
+import tensorflow as tf
 # In[ ]:
 
 # Atari Actions: 0 (noop), 1 (fire), 2 (left) and 3 (right) are valid actions
@@ -317,6 +317,8 @@ def deep_q_learning(sess,
             input_state= input_next_state
 
     print('Finished Remplay Memory Initialization')
+    episode_rewards= []
+    episode_lengths= []
 
     eps_step= (epsilon_start-epsilon_end)/ float(epsilon_decay_steps)
     epsilons= np.arange(epsilon_end, epsilon_start, eps_step)
@@ -326,8 +328,11 @@ def deep_q_learning(sess,
         state= state_processor.process(sess, state)
         input_state= np.stack([state]*4, axis=2)
         input_next_state= input_state
+        episode_length= 0
+        episode_reward= 0
 
         while True:
+            episode_length += 1
             t += 1
             if t> len(epsilons):
                 t= len(epsilons)-1
@@ -340,6 +345,11 @@ def deep_q_learning(sess,
             action_probs= ep_greedy(sess, input_state, epsilons[t])
             action= np.random.choice(range(len(VALID_ACTIONS)), p=action_probs)
             next_state, reward, done, _= env.step(VALID_ACTIONS[action])
+            episode_reward += reward
+            #env.render()
+            if done:
+                break
+
             next_state= state_processor.process(sess, next_state)
             input_next_state[:,:,:-1]= input_next_state[:,:,1:]
             input_next_state[:,:,-1]= next_state
@@ -358,18 +368,19 @@ def deep_q_learning(sess,
             qnext= target_estimator.predict(sess, current_states)
 
             # compute td error
-            td_target= reward + discount_factor*np.max(qnext[current_actions])
+            td_target= current_rewards + discount_factor*np.max(qnext)
 
             # update q_estimator
-            pdb.set_trace()
-            loss= q_estimator.update(sess, current_states, current_action, td_target)
+            loss= q_estimator.update(sess, current_states, current_actions, td_target)
             print('Current Loss ', loss)
-
-            if done:
-                break
 
             input_state= input_next_state
 
+
+        episode_rewards.append(episode_reward/episode_length)
+        episode_lengths.append(episode_length)
+
+    return episode_rewards, episode_lengths
 # In[ ]:
 
 tf.reset_default_graph()

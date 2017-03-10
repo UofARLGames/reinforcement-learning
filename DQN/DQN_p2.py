@@ -340,6 +340,7 @@ def deep_q_learning(sess,
         print('Actions ', action_probs)
         action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
         next_state, reward, done, _ = env.step(VALID_ACTIONS[action])
+        env.render()
         next_state = state_processor.process(sess, next_state)
         next_state = np.append(state[:,:,1:], np.expand_dims(next_state, 2), axis=2)
         replay_memory.append(Transition(state, action, reward, next_state, done))
@@ -406,7 +407,6 @@ def deep_q_learning(sess,
             stats.episode_lengths[i_episode] = t
 
             # Sample a minibatch from the replay memory
-            pdb.set_trace()
             samples = random.sample(replay_memory, batch_size)
             states_batch, action_batch, reward_batch, next_states_batch, done_batch = map(np.array, zip(*samples))
 
