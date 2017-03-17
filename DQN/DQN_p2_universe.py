@@ -12,7 +12,6 @@ import os
 import random
 import sys
 import universe
-import tensorflow as tf
 import pdb
 
 if "../" not in sys.path:
@@ -25,7 +24,9 @@ from collections import deque, namedtuple
 # In[ ]:
 
 #env = gym.envs.make("Breakout-v0")
-env = gym.make('flashgames.DuskDrive-v0')
+#env = gym.make('flashgames.DuskDrive-v0')
+env = gym.make('Breakout-v0')
+import tensorflow as tf
 #env.configure(remotes=1)  # automatically creates a local docker container
 #observation_n = env.reset()
 
@@ -203,7 +204,7 @@ with tf.Session() as sess:
     sess.run(tf.initialize_all_variables())
 
     # Example observation batch
-    env.configure(remotes=1)  # automatically creates a local docker container
+    env.configure()  # automatically creates a local docker container
     observation = env.reset()
     observation,_,_= strip_arrays(observation, [0], [0])
     observation_p = sp.process(sess, observation)

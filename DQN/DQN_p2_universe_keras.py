@@ -11,6 +11,7 @@ import numpy as np
 import os
 import random
 import sys
+import universe
 import pdb
 
 if "../" not in sys.path:
@@ -22,30 +23,48 @@ from collections import deque, namedtuple
 
 # In[ ]:
 
-env = gym.envs.make("Breakout-v0")
-
-
+#env = gym.envs.make("Breakout-v0")
+env = gym.make('flashgames.DuskDrive-v0')
+#env = gym.make('Breakout-v0')
 import tensorflow as tf
+#env.configure(remotes=1)  # automatically creates a local docker container
+#observation_n = env.reset()
+
+
+
 # In[ ]:
 
 # Atari Actions: 0 (noop), 1 (fire), 2 (left) and 3 (right) are valid actions
-VALID_ACTIONS = [0, 1, 2, 3]
+#VALID_ACTIONS = [0, 1, 2, 3]
+VALID_ACTIONS= [('KeyEvent', 'ArrowUp', True), ('KeyEvent', 'ArrowDown', True), ('KeyEvent', 'ArrowRight', True), ('KeyEvent', 'ArrowLeft', True)]
+#VALID_ACTIONS= [('KeyEvent', 'ArrowUp', True), ('KeyEvent', 'ArrowUp', True), ('KeyEvent', 'ArrowUp', True), ('KeyEvent', 'ArrowUp', True)]
+#VALID_ACTIONS= [('KeyEvent', 'ArrowUp', True)]
+
 
 
 # In[ ]:
-
 class StateProcessor():
+    """StateProcessor"""
     """
     Processes a raw Atari iamges. Resizes it and converts it to grayscale.
-    """
+   """
+    S_W= 768
+    S_H= 1024
+    C_W= 400
+    C_H= 400
+    N_W= 200
+    N_H= 200
+
     def __init__(self):
         # Build the Tensorflow graph
         with tf.variable_scope("state_processor"):
-            self.input_state = tf.placeholder(shape=[210, 160, 3], dtype=tf.uint8)
+            self.input_state = tf.placeholder(shape=[StateProcessor.S_W, StateProcessor.S_H, 3], dtype=tf.uint8)
             self.output = tf.image.rgb_to_grayscale(self.input_state)
-            self.output = tf.image.crop_to_bounding_box(self.output, 34, 0, 160, 160)
+            self.output = tf.image.crop_to_bounding_box(self.output, StateProcessor.S_W//2-StateProcessor.C_W//2, \
+                    StateProcessor.S_H//2-StateProcessor.C_H//2, \
+                    StateProcessor.C_W, StateProcessor.C_H)
             self.output = tf.image.resize_images(
-                self.output, tf.constant(np.array([84, 84],dtype='int32')), tf.image.ResizeMethod.NEAREST_NEIGHBOR)
+                self.output, tf.constant(np.array([StateProcessor.N_W, StateProcessor.N_H],dtype='int32')), tf.image.ResizeMethod.NEAREST_NEIGHBOR)
             self.output = tf.squeeze(self.output)
 
     def process(self, sess, state):
@@ -57,7 +76,10 @@ class StateProcessor():
         Returns:
             A processed [84, 84, 1] state representing grayscale values.
         """
-        return sess.run(self.output, { self.input_state: state })
+        if state is not None:
+            return sess.run(self.output, { self.input_state: state['vision'] })
+        else:
+            return np.zeros((StateProcessor.N_W,StateProcessor.N_H))
 
 
 # In[ ]:
@@ -88,7 +110,7 @@ class Estimator():
 
         # Placeholders for our input
         # Our input are 4 RGB frames of shape 160, 160 each
-        self.X_pl = tf.placeholder(shape=[None, 84, 84, 4], dtype=tf.uint8, name="X")
+        self.X_pl = tf.placeholder(shape=[None, StateProcessor.N_W, StateProcessor.N_H, 4], dtype=tf.uint8, name="X")
         # The TD target value
         self.y_pl = tf.placeholder(shape=[None], dtype=tf.float32, name="y")
         # Integer id of which action was selected
@@ -166,6 +188,9 @@ class Estimator():
             self.summary_writer.add_summary(summaries, global_step)
         return loss
 
+def strip_arrays(state, done, reward):
+    return state[0], done[0], reward[0]
+
 
 # In[ ]:
 
@@ -181,8 +206,9 @@ with tf.Session() as sess:
     sess.run(tf.initialize_all_variables())
 
     # Example observation batch
+    env.configure()  # automatically creates a local docker container
     observation = env.reset()
-
+    observation,_,_= strip_arrays(observation, [0], [0])
     observation_p = sp.process(sess, observation)
     observation = np.stack([observation_p] * 4, axis=2)
     observations = np.array([observation] * 2)
@@ -237,7 +263,9 @@ def make_epsilon_greedy_policy(estimator, nA):
     """
     def policy_fn(sess, observation, epsilon):
         A = np.ones(nA, dtype=float) * epsilon / nA
+        print('Obersvation Dimension', observation.shape )
         q_values = estimator.predict(sess, np.expand_dims(observation, 0))[0]
+
         best_action = np.argmax(q_values)
         A[best_action] += (1.0 - epsilon)
         return A
@@ -245,6 +273,20 @@ def make_epsilon_greedy_policy(estimator, nA):
 
 
 # In[ ]:
+def sample_action():
+    c= np.random.choice(range(len(VALID_ACTIONS)))
+    return [VALID_ACTIONS[c]]
+
+def wait(state, env):
+    while True:
+      action_n= []
+      for ob in state:
+        action_n.append(sample_action())
+      if state != [None]:
+          break
+      state, reward_n, done_n, info = env.step(action_n)
+      env.render()
+    return state
 
 def deep_q_learning(sess,
                     env,
@@ -254,7 +296,7 @@ def deep_q_learning(sess,
                     num_episodes,
                     experiment_dir,
                     replay_memory_size=500000,
-                    replay_memory_init_size=50000,
+                    replay_memory_init_size=50,
                     update_target_estimator_every=10000,
                     discount_factor=0.99,
                     epsilon_start=1.0,
@@ -291,99 +333,169 @@ def deep_q_learning(sess,
         An EpisodeStats object with two numpy arrays for episode_lengths and episode_rewards.
     """
 
-    ep_greedy= make_epsilon_greedy_policy(q_estimator, len(VALID_ACTIONS))
-    replay_memory= []
+    Transition = namedtuple("Transition", ["state", "action", "reward", "next_state", "done"])
 
-    mini_batch_size= 1
+    # The replay memory
+    replay_memory = []
 
-    # Initialize Replay Memory
-    state= env.reset()
-    state= state_processor.process(sess, state)
-    input_state= np.stack([state]*4, axis=2)
-    input_next_state= input_state
+    # Keeps track of useful statistics
+    stats = plotting.EpisodeStats(
+        episode_lengths=np.zeros(num_episodes),
+        episode_rewards=np.zeros(num_episodes))
+
+    # Create directories for checkpoints and summaries
+    checkpoint_dir = os.path.join(experiment_dir, "checkpoints")
+    checkpoint_path = os.path.join(checkpoint_dir, "model")
+    monitor_path = os.path.join(experiment_dir, "monitor")
+
+    if not os.path.exists(checkpoint_dir):
+        os.makedirs(checkpoint_dir)
+    if not os.path.exists(monitor_path):
+        os.makedirs(monitor_path)
+
+    saver = tf.train.Saver()
+    # Load a previous checkpoint if we find one
+    latest_checkpoint = tf.train.latest_checkpoint(checkpoint_dir)
+    if latest_checkpoint:
+        print("Loading model checkpoint {}...\n".format(latest_checkpoint))
+        saver.restore(sess, latest_checkpoint)
+
+    # Get the current time step
+    total_t = sess.run(tf.contrib.framework.get_global_step())
+
+    # The epsilon decay schedule
+    epsilons = np.linspace(epsilon_start, epsilon_end, epsilon_decay_steps)
+
+    # The policy we're following
+    policy = make_epsilon_greedy_policy(
+        q_estimator,
+        len(VALID_ACTIONS))
+
+    # Populate the replay memory with initial experience
+    print("Populating replay memory...")
+    state = env.reset()
+    state= wait(state, env)
+    print('Really Starting the popoulation of memory', state[0]['vision'].shape)
+
+    state, _, _= strip_arrays(state, [0], [0])
+    state = state_processor.process(sess, state)
+    state = np.stack([state] * 4, axis=2)
     for i in range(replay_memory_init_size):
-        action_probs= ep_greedy(sess, input_state, epsilon_start)
-        action= np.random.choice(range(len(VALID_ACTIONS)), p=action_probs)
-        next_state, reward, done, _= env.step(VALID_ACTIONS[action])
+        action_probs = policy(sess, state, epsilons[total_t])
+        action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
+        next_state, reward, done, _ = env.step([[VALID_ACTIONS[action]]])
+        next_state, done, reward= strip_arrays(next_state, done, reward)
         env.render()
-        next_state= state_processor.process(sess, next_state)
-        input_next_state[:,:,:-1]= input_next_state[:,:,1:]
-        input_next_state[:,:,-1]= next_state
-        replay_memory.append((input_state, action, input_next_state, reward, done))
+        next_state = state_processor.process(sess, next_state)
+        next_state = np.append(state[:,:,1:], np.expand_dims(next_state, 2), axis=2)
+        replay_memory.append(Transition(state, action, reward, next_state, done))
         if done:
-            state= env.reset()
-            state= state_processor.process(sess, state)
-            input_state= np.stack([state]*4, axis=2)
+            print('Some Unknown reason it is done')
+            state = env.reset()
+            state = state_processor.process(sess, state)
+            state = np.stack([state] * 4, axis=2)
         else:
-            input_state= input_next_state
+            state = next_state
 
-    print('Finished Remplay Memory Initialization')
-    episode_rewards= []
-    episode_lengths= []
+    print("Finished Populating replay memory...")
+    # Record videos
+    env.monitor.start(monitor_path,
+                      resume=True,
+                      video_callable=lambda count: count % record_video_every == 0)
 
-    eps_step= (epsilon_start-epsilon_end)/ float(epsilon_decay_steps)
-    epsilons= np.arange(epsilon_end, epsilon_start, eps_step)
-    t= 0
-    for i in range(num_episodes):
-        state= env.reset()
-        state= state_processor.process(sess, state)
-        input_state= np.stack([state]*4, axis=2)
-        input_next_state= input_state
-        episode_length= 0
-        episode_reward= 0
+    state= env.reset()
+    for i_episode in range(num_episodes):
 
-        while True:
-            episode_length += 1
-            t += 1
-            if t> len(epsilons):
-                t= len(epsilons)-1
+        # Save the current checkpoint
+        saver.save(tf.get_default_session(), checkpoint_path)
 
-            # copy parameters from q_estimator to t_estimator
-            if t % update_target_estimator_every==0:
+        # Reset the environment
+        state = env.reset()
+        state= wait(state, env)
+        state, _, _= strip_arrays(state, [0], [0])
+        state = state_processor.process(sess, state)
+        state = np.stack([state] * 4, axis=2)
+        loss = None
+
+        # One step in the environment
+        for t in itertools.count():
+
+            # Epsilon for this time step
+            epsilon = epsilons[min(total_t, epsilon_decay_steps-1)]
+
+            # Add epsilon to Tensorboard
+            episode_summary = tf.Summary()
+            episode_summary.value.add(simple_value=epsilon, tag="epsilon")
+            q_estimator.summary_writer.add_summary(episode_summary, total_t)
+
+            # Maybe update the target estimator
+            if total_t % update_target_estimator_every == 0:
                 copy_model_parameters(sess, q_estimator, target_estimator)
+                print("\nCopied model parameters to target network.")
 
-            # use epsilon greedy to get A_next, S_next
-            action_probs= ep_greedy(sess, input_state, epsilons[t])
-            action= np.random.choice(range(len(VALID_ACTIONS)), p=action_probs)
-            next_state, reward, done, _= env.step(VALID_ACTIONS[action])
-            episode_reward += reward
+            # Print out which step we're on, useful for debugging.
+            print("\rStep {} ({}) @ Episode {}/{}, loss: {}".format(
+                    t, total_t, i_episode + 1, num_episodes, loss))
+            sys.stdout.flush()
+
+            # Take a step
+            action_probs = policy(sess, state, epsilon)
+            action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
+            next_state, reward, done, _ = env.step([[VALID_ACTIONS[action]]])
+            next_state, done, reward= strip_arrays(next_state, done, reward)
             env.render()
+            next_state = state_processor.process(sess, next_state)
+            next_state = np.append(state[:,:,1:], np.expand_dims(next_state, 2), axis=2)
+
+            # If our replay memory is full, pop the first element
+            if len(replay_memory) == replay_memory_size:
+                replay_memory.pop(0)
+
+            # Save transition to replay memory
+            replay_memory.append(Transition(state, action, reward, next_state, done))
+
+            # Update statistics
+            stats.episode_rewards[i_episode] += reward
+            stats.episode_lengths[i_episode] = t
+
+            # Sample a minibatch from the replay memory
+            samples = random.sample(replay_memory, batch_size)
+            states_batch, action_batch, reward_batch, next_states_batch, done_batch = map(np.array, zip(*samples))
+
+            # Calculate q values and targets
+            q_values_next = target_estimator.predict(sess, next_states_batch)
+            targets_batch = reward_batch + np.invert(done_batch).astype(np.float32) * discount_factor * np.amax(q_values_next, axis=1)
+
+            # Perform gradient descent update
+            states_batch = np.array(states_batch)
+            print('Size: ', states_batch.shape, action_batch.shape, targets_batch.shape)
+            loss = q_estimator.update(sess, states_batch, action_batch, targets_batch)
+
             if done:
                 break
 
-            next_state= state_processor.process(sess, next_state)
-            input_next_state[:,:,:-1]= input_next_state[:,:,1:]
-            input_next_state[:,:,-1]= next_state
+            state = next_state
+            total_t += 1
 
-            # update replay memory
-            if len(replay_memory)== replay_memory_size:
-                replay_memory.pop(0)
-            replay_memory.append((input_state, action, input_next_state, reward, done))
+        # Add summaries to tensorboard
+        episode_summary = tf.Summary()
+        episode_summary.value.add(simple_value=stats.episode_rewards[i_episode], node_name="episode_reward", tag="episode_reward")
+        episode_summary.value.add(simple_value=stats.episode_lengths[i_episode], node_name="episode_length", tag="episode_length")
+        q_estimator.summary_writer.add_summary(episode_summary, total_t)
+        q_estimator.summary_writer.flush()
 
-            #sample from replay memory to input to target estimator
-            current_batch= random.sample(replay_memory, mini_batch_size)
-            current_states, current_actions,current_next_states, current_rewards, current_done \
-                = map( np.array,zip(*current_batch))
+        yield total_t, plotting.EpisodeStats(
+            episode_lengths=stats.episode_lengths[:i_episode+1],
+            episode_rewards=stats.episode_rewards[:i_episode+1])
 
-            # use T_estimator to get Q_next, 0 coz no mini_bs
-            qnext= target_estimator.predict(sess, current_states)
-
-            # compute td error
-            td_target= current_rewards + discount_factor*np.max(qnext)
-
-            # update q_estimator
-            loss= q_estimator.update(sess, current_states, current_actions, td_target)
-            print('Current Loss ', loss)
-
-            input_state= input_next_state
+    env.monitor.close()
+    yield stats
+    return
 
 
-        episode_rewards.append(episode_reward/episode_length)
-        episode_lengths.append(episode_length)
-
-    return episode_rewards, episode_lengths
 # In[ ]:
 
+print('Running DQN\n')
 tf.reset_default_graph()
 
 # Where we save our checkpoints and graphs
@@ -399,6 +511,7 @@ target_estimator = Estimator(scope="target_q")
 # State processor
 state_processor = StateProcessor()
 
+
 # Run it!
 with tf.Session() as sess:
     sess.run(tf.initialize_all_variables())
@@ -410,7 +523,7 @@ with tf.Session() as sess:
                                     experiment_dir=experiment_dir,
                                     num_episodes=10000,
                                     replay_memory_size=500000,
-                                    replay_memory_init_size=500,
+                                    replay_memory_init_size=50,
                                     update_target_estimator_every=10000,
                                     epsilon_start=1.0,
                                     epsilon_end=0.1,
