@@ -16,11 +16,14 @@ env = gym.envs.make("Breakout-v0")
 
 # Atari Actions: 0 (noop), 1 (fire), 2 (left) and 3 (right) are valid actions
 VALID_ACTIONS = [0, 1, 2, 3]
+target_default_path = os.path.join(os.getcwd(),'models/farhad_dqn/target')
+q_default_path = os.path.join(os.getcwd(),'models/farhad_dqn/q')
+if not os.path.isdir(target_default_path):
+    os.makedirs(target_default_path)
 
-class episode_stat(object):
-    """
-    stat for episode
-    """
+if not os.path.isdir(q_default_path):
+    os.makedirs(q_default_path)
+
 
 class StateProcessor():
     """
@@ -53,10 +56,12 @@ class Estimator():
     This network is used for both the Q-Network and the Target Network.
     """
 
-    def __init__(self, scope="estimator", summaries_dir=None):
+    def __init__(self, scope="estimator", summaries_dir=None,max_to_keep=100):
         self.scope = scope
         # Writes Tensorboard summaries to disk
         self.summary_writer = None
+        self.step = 0
+
         with tf.variable_scope(scope):
             # Build the graph
             self._build_model()
@@ -65,6 +70,9 @@ class Estimator():
                 if not os.path.exists(summary_dir):
                     os.makedirs(summary_dir)
                 self.summary_writer = tf.train.SummaryWriter(summary_dir)
+
+        vars_to_save = {t.name:t for t in tf.trainable_variables() if t.name.startswith(self.scope)}
+        self.saver = tf.train.Saver(var_list = vars_to_save, name=self.scope ,max_to_keep=100)
 
     def _build_model(self):
         """
@@ -108,7 +116,7 @@ class Estimator():
         self.train_op = self.optimizer.minimize(self.loss, global_step=tf.contrib.framework.get_global_step())
 
         # Summaries for Tensorboard
-        self.summaries = tf.merge_summary([
+        self.summaries = tf.summary.merge_all([
             tf.scalar_summary("loss", self.loss),
             tf.histogram_summary("loss_hist", self.losses),
             tf.histogram_summary("q_values_hist", self.predictions),
@@ -151,7 +159,26 @@ class Estimator():
             self.summary_writer.add_summary(summaries, global_step)
         return loss
 
+    def save(self,sess, path,step=None): 
+        mypath=os.path.join(path,self.scope)
 
+        self.saver.save(sess, mypath, global_step=self.step,write_meta_graph=True)
+        self.step +=1
+
+        print("\n\n\n\n\n\n\n\n list of last_checkpoints: {}\n\n\n\n\n\n\n".format(self.saver.last_checkpoints))
+        #self.saver.set_last_checkpoints_with_time(self.saver.last_checkpoints)
+        #self.saver.export_meta_graph()
+    def restore(self,sess,path,file_to_recover):
+        #path =default_path
+        recover=os.path.join(path,file_to_recover)
+        print("\n\n\n\n\n\n\n\n list of last_checkpoints: {}\n\n\n\n\n\n\n".format(file_to_recover))
+        #files = [i for i in os.listdir(path) ]#if os.path.isfile(os.path.join(path,i)) and \
+        #  i.startswith(name) and not i.endswith('meta') and not i.endswith('index')]
+        #file_to_restore = os.path.join(path,files[-1])
+
+        #new_saver = tf.train.import_meta_graph(path)
+        #new_saver.restore(sess,file_to_restore)
+        self.saver.restore(sess,recover)
 # For Testing....
 
 tf.reset_default_graph()
@@ -223,6 +250,13 @@ def make_epsilon_greedy_policy(estimator, nA):
         return A
     return policy_fn
 
+def check_file(path,scope):
+    files = os.listdir(path)
+    #file_to_restore = [i for i in files if not i.endswith('meta') and not i.endswith('index') and i.startswith(scope)]
+    file_to_restore = [i.rstrip('.meta') for i in files if i.endswith('meta')]
+    return sorted(file_to_restore,reverse=True)
+    
+
 
 def deep_q_learning(sess,
                     env,
@@ -284,6 +318,19 @@ def deep_q_learning(sess,
     Then Target Estimator model gets updated every n step.
 
     """
+    #latest_checkpoint = tf.train.latest_checkpoint(checkpoint_dir)
+    target_file_to_recover= check_file(target_default_path,target_estimator.scope)
+    if target_file_to_recover:
+        print("\n\nRestoring model for Target Estimator from : {} ...\n\n\n".format(target_file_to_recover))
+        target_estimator.restore(sess,target_default_path,target_file_to_recover[0])
+    
+    q_file_to_recover= check_file(q_default_path,q_estimator.scope)
+    if q_file_to_recover:
+        print("\n\nRestoring model for Target Estimator from : {} ...\n\n\n".format(q_file_to_recover))
+        q_estimator.restore(sess,q_default_path,q_file_to_recover[0])
+    save_every_step = 100
+    q_name= 'q'
+    target_name = 'target'
     replay_memory = []
     state = env.reset()
     policy = make_epsilon_greedy_policy(q_estimator,len(VALID_ACTIONS))
@@ -320,6 +367,7 @@ def deep_q_learning(sess,
     eps_step= (epsilon_start-epsilon_end)/ float(epsilon_decay_steps)
     epsilons= np.arange(epsilon_end, epsilon_start, eps_step)
     t= 0
+    step = 0
     for i in range(num_episodes):
         state= env.reset()
         state= state_processor.process(sess, state)
@@ -330,6 +378,7 @@ def deep_q_learning(sess,
 
         while True:
             t+=1
+            step +=1
             if len(replay_memory) == replay_memory_size:
                 replay_memory.pop()
             if t> len(epsilons):
@@ -359,6 +408,9 @@ def deep_q_learning(sess,
             print("loss is: {}".format(loss))
             #stats.episode_rewards[i] += reward
             #stats.episode_lengths[i] = episode_length
+            if step % save_every_step == 1:
+                q_estimator.save(sess, q_default_path)
+                path=target_estimator.save(sess,target_default_path)
             if done:
                 break
 
